@@ -26,6 +26,13 @@ import {
 } from "recharts";
 
 import { getTransactions } from "../services/api";
+import {
+  calculateElectricityCost,
+  calculateGrossMargin,
+  calculateMarginPercentage,
+  calculateAverageRevenuePerSwap,
+  filterCompletedTransactions,
+} from "../utils/calculations";
 
 
 const ELECTRICITY_RATE = 6.5;
@@ -148,12 +155,7 @@ function Revenue() {
   const completedTransactions =
     useMemo(() => {
 
-      return transactions.filter(
-        (transaction) =>
-          String(
-            transaction.status || ""
-          ).toUpperCase() === "COMPLETED"
-      );
+      return filterCompletedTransactions(transactions);
 
     }, [transactions]);
 
@@ -217,8 +219,7 @@ function Revenue() {
   */
 
   const electricityCost =
-    totalEnergy *
-    ELECTRICITY_RATE;
+    calculateElectricityCost(totalEnergy, ELECTRICITY_RATE);
 
 
   /*
@@ -228,8 +229,7 @@ function Revenue() {
   */
 
   const grossMargin =
-    totalRevenue -
-    electricityCost;
+    calculateGrossMargin(totalRevenue, electricityCost);
 
 
   /*
@@ -239,13 +239,7 @@ function Revenue() {
   */
 
   const marginPercentage =
-    totalRevenue > 0
-      ? Math.round(
-          (grossMargin /
-            totalRevenue) *
-            100
-        )
-      : 0;
+    calculateMarginPercentage(grossMargin, totalRevenue);
 
 
   /*
@@ -255,10 +249,7 @@ function Revenue() {
   */
 
   const averageRevenuePerSwap =
-    totalSwaps > 0
-      ? totalRevenue /
-        totalSwaps
-      : 0;
+    calculateAverageRevenuePerSwap(totalRevenue, totalSwaps);
 
 
   /*

@@ -1,0 +1,329 @@
+name: CI/CD Pipeline
+
+# ==============================================================================
+# SwapOS GitHub Actions CI/CD Workflow
+#
+# Triggers:
+# 1. Pull Requests targeting 'main':
+#    - Executes dependency install, linting (oxlint), and unit tests (vitest).
+# 2. Pushes / Merges to 'main':
+#    - Executes linting and unit tests.
+#    - On success, builds and deploys to Vercel PREVIEW environment (never production).
+#    - Sends Slack notification on deployment success or failure.
+# ==============================================================================
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+# Least-privilege permissions: explicitly restrict GITHUB_TOKEN to read-only access
+permissions:
+  contents: read
+
+# Prevent concurrent deployment collisions
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # JOB 1: Lint, Unit Tests & Production Build Check (CI)
+  # ----------------------------------------------------------------------------
+  lint-and-test:
+    name: Lint, Tests & Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (v20)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies (clean install)
+        run: npm ci
+
+      - name: Run linter (oxlint)
+        run: npm run lint
+
+      - name: Run unit test suite (vitest)
+        run: npm test
+
+      - name: Build frontend bundle (production build check)
+        run: npm run build
+
+      # ------------------------------------------------------------------------
+      # SLACK NOTIFICATION: CI Failure (Lint, Test or Build Failure)
+      # Notifies team if code quality or build checks fail on PR or main.
+      # ------------------------------------------------------------------------
+      - name: Notify Slack on CI Failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          REPO_NAME: ${{ github.repository }}
+          BRANCH_NAME: ${{ github.ref_name }}
+          COMMIT_SHA: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+          RUN_ID: ${{ github.run_id }}
+          SERVER_URL: ${{ github.server_url }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "SLACK_WEBHOOK_URL is not set. Skipping Slack notification."
+            exit 0
+          fi
+
+          python3 -c '
+          import os, json, urllib.request
+
+          webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "")
+          repo = os.environ.get("REPO_NAME", "")
+          branch = os.environ.get("BRANCH_NAME", "")
+          sha = os.environ.get("COMMIT_SHA", "")
+          actor = os.environ.get("ACTOR", "")
+          run_id = os.environ.get("RUN_ID", "")
+          server_url = os.environ.get("SERVER_URL", "")
+          event = os.environ.get("EVENT_NAME", "")
+
+          payload = {
+              "blocks": [
+                  {
+                      "type": "header",
+                      "text": {"type": "plain_text", "text": "❌ CI Checks Failed (Lint / Tests / Build)", "emoji": True}
+                  },
+                  {
+                      "type": "section",
+                      "fields": [
+                          {"type": "mrkdwn", "text": f"*Repository:*\n<{server_url}/{repo}|{repo}>"},
+                          {"type": "mrkdwn", "text": f"*Branch / PR:*\n`{branch}` ({event})"},
+                          {"type": "mrkdwn", "text": f"*Commit:*\n<{server_url}/{repo}/commit/{sha}|{sha[:7]}>"},
+                          {"type": "mrkdwn", "text": f"*Triggered By:*\n{actor}"}
+                      ]
+                  },
+                  {
+                      "type": "section",
+                      "text": {"type": "mrkdwn", "text": "⚠️ *Code quality or build checks failed.* Linting, unit tests, or the production build check failed before deployment could proceed."}
+                  },
+                  {
+                      "type": "context",
+                      "elements": [
+                          {"type": "mrkdwn", "text": f"🔍 SwapOS CI/CD • <{server_url}/{repo}/actions/runs/{run_id}|View CI Failure Logs>"}
+                      ]
+                  }
+              ]
+          }
+
+          req = urllib.request.Request(
+              webhook_url,
+              data=json.dumps(payload).encode("utf-8"),
+              headers={"Content-Type": "application/json"}
+          )
+          urllib.request.urlopen(req)
+          '
+
+  # ----------------------------------------------------------------------------
+  # JOB 2: Build & Deploy to Vercel Preview (CD)
+  #
+  # SAFEGUARDS:
+  # - Only runs on push to 'main' AFTER 'lint-and-test' passes.
+  # - Uses '--environment=preview' and omits '--prod' to guarantee isolated
+  #   preview deployments that never overwrite production.
+  # ----------------------------------------------------------------------------
+  deploy-preview:
+    name: Build & Deploy to Vercel Preview
+    runs-on: ubuntu-latest
+    needs: [lint-and-test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (v20)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Pull Vercel Preview Environment Information
+        run: vercel pull --yes --environment=preview --token=${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: Build Project Artifacts for Preview
+        run: vercel build --token=${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      # NOTE: --prod flag is strictly omitted to prevent deploying to production.
+      - name: Deploy to Vercel Preview
+        id: vercel_deploy
+        run: |
+          PREVIEW_URL=$(vercel deploy --prebuilt --token=${{ secrets.VERCEL_TOKEN }})
+          echo "PREVIEW_URL=$PREVIEW_URL" >> $GITHUB_ENV
+          echo "preview_url=$PREVIEW_URL" >> $GITHUB_OUTPUT
+          echo "Successfully deployed preview to: $PREVIEW_URL"
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      # ------------------------------------------------------------------------
+      # SLACK NOTIFICATION: Deployment Success
+      # Uses environment variables to prevent script injection attacks.
+      # ------------------------------------------------------------------------
+      - name: Notify Slack on Success
+        if: success()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          REPO_NAME: ${{ github.repository }}
+          BRANCH_NAME: ${{ github.ref_name }}
+          COMMIT_SHA: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+          RUN_ID: ${{ github.run_id }}
+          SERVER_URL: ${{ github.server_url }}
+          PREVIEW_URL: ${{ env.PREVIEW_URL }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "SLACK_WEBHOOK_URL is not set. Skipping Slack notification."
+            exit 0
+          fi
+
+          python3 -c '
+          import os, json, urllib.request
+
+          webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "")
+          repo = os.environ.get("REPO_NAME", "")
+          branch = os.environ.get("BRANCH_NAME", "")
+          sha = os.environ.get("COMMIT_SHA", "")
+          actor = os.environ.get("ACTOR", "")
+          run_id = os.environ.get("RUN_ID", "")
+          server_url = os.environ.get("SERVER_URL", "")
+          preview_url = os.environ.get("PREVIEW_URL", "")
+          commit_msg = (os.environ.get("COMMIT_MSG", "") or "").split("\n")[0]
+
+          payload = {
+              "blocks": [
+                  {
+                      "type": "header",
+                      "text": {"type": "plain_text", "text": "✅ Vercel Preview Deployment Succeeded", "emoji": True}
+                  },
+                  {
+                      "type": "section",
+                      "fields": [
+                          {"type": "mrkdwn", "text": f"*Repository:*\n<{server_url}/{repo}|{repo}>"},
+                          {"type": "mrkdwn", "text": f"*Branch:*\n`{branch}`"},
+                          {"type": "mrkdwn", "text": f"*Commit:*\n<{server_url}/{repo}/commit/{sha}|{sha[:7]}>"},
+                          {"type": "mrkdwn", "text": f"*Author:*\n{actor}"}
+                      ]
+                  },
+                  {
+                      "type": "section",
+                      "text": {"type": "mrkdwn", "text": f"*Preview URL:* <{preview_url}|{preview_url}>\n*Commit:* {commit_msg}"}
+                  },
+                  {
+                      "type": "context",
+                      "elements": [
+                          {"type": "mrkdwn", "text": f"🚀 SwapOS CI/CD • <{server_url}/{repo}/actions/runs/{run_id}|View Workflow Run>"}
+                      ]
+                  }
+              ]
+          }
+
+          req = urllib.request.Request(
+              webhook_url,
+              data=json.dumps(payload).encode("utf-8"),
+              headers={"Content-Type": "application/json"}
+          )
+          urllib.request.urlopen(req)
+          '
+
+      # ------------------------------------------------------------------------
+      # SLACK NOTIFICATION: Deployment Failure
+      # Uses environment variables to prevent script injection attacks.
+      # ------------------------------------------------------------------------
+      - name: Notify Slack on Failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          REPO_NAME: ${{ github.repository }}
+          BRANCH_NAME: ${{ github.ref_name }}
+          COMMIT_SHA: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+          RUN_ID: ${{ github.run_id }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "SLACK_WEBHOOK_URL is not set. Skipping Slack notification."
+            exit 0
+          fi
+
+          python3 -c '
+          import os, json, urllib.request
+
+          webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "")
+          repo = os.environ.get("REPO_NAME", "")
+          branch = os.environ.get("BRANCH_NAME", "")
+          sha = os.environ.get("COMMIT_SHA", "")
+          actor = os.environ.get("ACTOR", "")
+          run_id = os.environ.get("RUN_ID", "")
+          server_url = os.environ.get("SERVER_URL", "")
+
+          payload = {
+              "blocks": [
+                  {
+                      "type": "header",
+                      "text": {"type": "plain_text", "text": "❌ Vercel Preview Deployment Failed", "emoji": True}
+                  },
+                  {
+                      "type": "section",
+                      "fields": [
+                          {"type": "mrkdwn", "text": f"*Repository:*\n<{server_url}/{repo}|{repo}>"},
+                          {"type": "mrkdwn", "text": f"*Branch:*\n`{branch}`"},
+                          {"type": "mrkdwn", "text": f"*Commit:*\n<{server_url}/{repo}/commit/{sha}|{sha[:7]}>"},
+                          {"type": "mrkdwn", "text": f"*Triggered By:*\n{actor}"}
+                      ]
+                  },
+                  {
+                      "type": "section",
+                      "text": {"type": "mrkdwn", "text": "⚠️ *The preview deployment job encountered an error.* Check the workflow logs below for details."}
+                  },
+                  {
+                      "type": "context",
+                      "elements": [
+                          {"type": "mrkdwn", "text": f"🔍 SwapOS CI/CD • <{server_url}/{repo}/actions/runs/{run_id}|View Error Logs>"}
+                      ]
+                  }
+              ]
+          }
+
+          req = urllib.request.Request(
+              webhook_url,
+              data=json.dumps(payload).encode("utf-8"),
+              headers={"Content-Type": "application/json"}
+          )
+          urllib.request.urlopen(req)
+          '
