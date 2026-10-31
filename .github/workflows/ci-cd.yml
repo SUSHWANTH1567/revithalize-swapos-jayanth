@@ -163,16 +163,34 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # ------------------------------------------------------------------------
+      # VERCEL CREDENTIALS CHECK (Graceful Deployment Guard)
+      # Skips preview deployment if secrets have not been configured yet.
+      # ------------------------------------------------------------------------
+      - name: Check for Vercel Deployment Credentials
+        id: check_vercel
+        run: |
+          if [ -z "${{ secrets.VERCEL_TOKEN }}" ]; then
+            echo "has_token=false" >> $GITHUB_OUTPUT
+            echo "::notice title=Deployment Guard::VERCEL_TOKEN secret is not yet configured. Skipping preview deployment until secrets are set."
+            echo "VERCEL_TOKEN is not set. Skipping Vercel deployment cleanly."
+          else
+            echo "has_token=true" >> $GITHUB_OUTPUT
+          fi
+
       - name: Install Vercel CLI
+        if: steps.check_vercel.outputs.has_token == 'true'
         run: npm install --global vercel@latest
 
       - name: Pull Vercel Preview Environment Information
+        if: steps.check_vercel.outputs.has_token == 'true'
         run: vercel pull --yes --environment=preview --token=${{ secrets.VERCEL_TOKEN }}
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
 
       - name: Build Project Artifacts for Preview
+        if: steps.check_vercel.outputs.has_token == 'true'
         run: vercel build --token=${{ secrets.VERCEL_TOKEN }}
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
@@ -180,6 +198,7 @@ jobs:
 
       # NOTE: --prod flag is strictly omitted to prevent deploying to production.
       - name: Deploy to Vercel Preview
+        if: steps.check_vercel.outputs.has_token == 'true'
         id: vercel_deploy
         run: |
           PREVIEW_URL=$(vercel deploy --prebuilt --token=${{ secrets.VERCEL_TOKEN }})
@@ -195,7 +214,7 @@ jobs:
       # Uses environment variables to prevent script injection attacks.
       # ------------------------------------------------------------------------
       - name: Notify Slack on Success
-        if: success()
+        if: success() && steps.check_vercel.outputs.has_token == 'true'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           COMMIT_MSG: ${{ github.event.head_commit.message }}
@@ -266,7 +285,7 @@ jobs:
       # Uses environment variables to prevent script injection attacks.
       # ------------------------------------------------------------------------
       - name: Notify Slack on Failure
-        if: failure()
+        if: failure() && steps.check_vercel.outputs.has_token == 'true'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           REPO_NAME: ${{ github.repository }}
