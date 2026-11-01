@@ -161,7 +161,9 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
-        run: npm ci
+        run: |
+          npm ci
+          echo "$PWD/node_modules/.bin" >> $GITHUB_PATH
 
       # ------------------------------------------------------------------------
       # VERCEL CREDENTIALS CHECK (Graceful Deployment Guard)
@@ -195,6 +197,7 @@ jobs:
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          PATH: ${{ github.workspace }}/frontend/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
 
       # NOTE: --prod flag is strictly omitted to prevent deploying to production.
       - name: Deploy to Vercel Preview
@@ -208,6 +211,7 @@ jobs:
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          PATH: ${{ github.workspace }}/frontend/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
 
       # ------------------------------------------------------------------------
       # SLACK NOTIFICATION: Deployment Success
